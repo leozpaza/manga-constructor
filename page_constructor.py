@@ -906,23 +906,27 @@ class PageConstructor:
         # 1) основной овал
         self.draw_round_panel(panel)
 
-        # 2) точка крепления хвоста (центр нижней стороны овала)
-        x1_s, y1_s = self.page_to_screen(panel.x,               panel.y)
-        x2_s, y2_s = self.page_to_screen(panel.x + panel.width, panel.y + panel.height)
-        root_x, root_y = (x1_s + x2_s) / 2, y2_s
+        # 2) точка крепления хвоста (центр нижней стороны овала с учётом offset)
+        root_x, root_y = self.page_to_screen(
+            panel.x + panel.width / 2 + panel.tail_root_offset,
+            panel.y + panel.height,
+        )
 
-        # 3) кончик хвоста с учётом dx/dy
-        end_x = root_x + panel.tail_dx
-        end_y = root_y + panel.tail_dy
+        # 3) кончик хвоста (tail_dx, tail_dy хранятся в единицах страницы)
+        end_x, end_y = self.page_to_screen(
+            panel.x + panel.width / 2 + panel.tail_root_offset + panel.tail_dx,
+            panel.y + panel.height + panel.tail_dy,
+        )
 
         # 4) стиль
         outline = "#FF6B6B" if panel.selected else panel.style.border_color
         bw      = max(1, int(panel.style.border_width * self.zoom))
 
         # 5) треугольник-хвост
+        base = 12 * self.zoom
         self.canvas.create_polygon(
-            root_x - 5 * self.zoom, root_y,
-            root_x + 5 * self.zoom, root_y,
+            root_x - base, root_y,
+            root_x + base, root_y,
             end_x, end_y,
             fill=panel.style.fill_color,
             outline=outline,
@@ -1174,10 +1178,11 @@ class PageConstructor:
         # 3-a. перетягиваем хвост речевого пузыря
         if self.drag_mode == "move_tail" and self.tail_move_panel:
             p = self.tail_move_panel
-            root_x = (p.x + p.width / 2) * self.zoom + self.margin
-            root_y = (p.y + p.height)      * self.zoom + self.margin
-            p.tail_dx = event.x - root_x
-            p.tail_dy = event.y - root_y
+            root_page_x = p.x + p.width / 2 + p.tail_root_offset
+            root_page_y = p.y + p.height
+            mouse_page_x, mouse_page_y = self.screen_to_page(event.x, event.y)
+            p.tail_dx = mouse_page_x - root_page_x
+            p.tail_dy = mouse_page_y - root_page_y
             p.mark_visuals_for_update()
             self.redraw()
             return
