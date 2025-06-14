@@ -1174,7 +1174,7 @@ class ExportManager:
                     draw.rectangle(text_bounds, outline=panel.style.border_color, width=border_w)
             except ValueError:
                 logger.warning(f"Некорректный цвет рамки '{panel.style.border_color}' у панели {panel.id}")
-
+                
     def _render_panel_image_content(
             self,
             panel: Panel,
@@ -1186,6 +1186,9 @@ class ExportManager:
             origin_y: int = 0,
     ) -> None:
         """Отрисовка изображения внутри панели на временный буфер."""
+    def _render_panel_image_content(self, panel: Panel, panel_buf: Image.Image,
+                                    panel_w_px: int, panel_h_px: int) -> None:
+        """Отрисовывает изображение панели в указанный буфер."""
         if not panel.content_image or not os.path.exists(panel.content_image):
             return
 
@@ -1208,6 +1211,23 @@ class ExportManager:
         offset_y_px = int(panel.image_offset_y * sy) + origin_y
 
         panel_buf.paste(img_resized, (offset_x_px, offset_y_px))
+            with Image.open(panel.content_image) as img:
+                sx = panel_w_px / panel.width if panel.width else 1.0
+                sy = panel_h_px / panel.height if panel.height else 1.0
+
+                render_w = int(img.width * panel.image_scale * sx)
+                render_h = int(img.height * panel.image_scale * sy)
+                if render_w <= 0 or render_h <= 0:
+                    return
+
+                img_resized = img.resize((render_w, render_h), Image.Resampling.LANCZOS)
+
+                offset_x = int(panel.image_offset_x * sx)
+                offset_y = int(panel.image_offset_y * sy)
+
+                panel_buf.paste(img_resized, (offset_x, offset_y))
+        except Exception as e:
+            logger.error(f"Ошибка рендеринга изображения панели {panel.id}: {e}")
             
     def render_panel_text(self, draw: ImageDraw.Draw, panel: Panel, 
                          bounds: Tuple[int, int, int, int], scale_factor: float):

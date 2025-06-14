@@ -927,6 +927,17 @@ class PageConstructor:
         end_page_x = root_page_x + panel.tail_dx
         end_page_y = root_page_y + panel.tail_dy
         end_x, end_y = self.page_to_screen(end_page_x, end_page_y)
+        # 2) точка крепления хвоста (центр нижней стороны овала с учётом offset)
+        root_x, root_y = self.page_to_screen(
+            panel.x + panel.width / 2 + panel.tail_root_offset,
+            panel.y + panel.height,
+        )
+
+        # 3) кончик хвоста (tail_dx, tail_dy хранятся в единицах страницы)
+        end_x, end_y = self.page_to_screen(
+            panel.x + panel.width / 2 + panel.tail_root_offset + panel.tail_dx,
+            panel.y + panel.height + panel.tail_dy,
+        )
 
         # 4) стиль
         outline = "#FF6B6B" if panel.selected else panel.style.border_color
@@ -950,6 +961,12 @@ class PageConstructor:
 
         self.canvas.create_polygon(
             x1, y1, x2, y2, end_x, end_y,
+        # 5) треугольник-хвост
+        base = 12 * self.zoom
+        self.canvas.create_polygon(
+            root_x - base, root_y,
+            root_x + base, root_y,
+            end_x, end_y,
             fill=panel.style.fill_color,
             outline=outline,
             width=bw,
@@ -1245,6 +1262,11 @@ class PageConstructor:
             root_py = cy + (p.height / 2) * math.sin(angle)
             p.tail_dx = self.tail_root_drag_end_x - root_px
             p.tail_dy = self.tail_root_drag_end_y - root_py
+            root_page_x = p.x + p.width / 2 + p.tail_root_offset
+            root_page_y = p.y + p.height
+            mouse_page_x, mouse_page_y = self.screen_to_page(event.x, event.y)
+            p.tail_dx = mouse_page_x - root_page_x
+            p.tail_dy = mouse_page_y - root_page_y
             p.mark_visuals_for_update()
             self.redraw()
             return
