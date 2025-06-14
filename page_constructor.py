@@ -69,6 +69,10 @@ class Panel:
     tail_dy: float = 20.0
 
     tail_root_offset: float = 0.0
+
+    # Угол положения основания хвоста относительно центра овала (радианы).
+    # pi/2 соответствует нижней точке, т.е. хвост снизу по умолчанию.
+    tail_root_angle: float = math.pi / 2
     
     # Для неправильных форм - список точек
     custom_points: List[Tuple[float, float]] = field(default_factory=list)
@@ -146,6 +150,9 @@ class PageConstructor:
 
         self.creation_panel_type: Optional[PanelType] = None
         self.tail_move_panel: Optional[Panel] = None
+        self.tail_root_move_panel: Optional[Panel] = None
+        self.tail_root_drag_end_x: float = 0.0
+        self.tail_root_drag_end_y: float = 0.0
         
         # Настройки страницы
         self.page_width = 595
@@ -906,36 +913,61 @@ class PageConstructor:
         # 1) основной овал
         self.draw_round_panel(panel)
 
-        # 2) точка крепления хвоста (центр нижней стороны овала)
-        x1_s, y1_s = self.page_to_screen(panel.x,               panel.y)
-        x2_s, y2_s = self.page_to_screen(panel.x + panel.width, panel.y + panel.height)
-        root_x, root_y = (x1_s + x2_s) / 2, y2_s
+        # 2) точка крепления хвоста
+        center_x = panel.x + panel.width / 2
+        center_y = panel.y + panel.height / 2
 
-        # 3) кончик хвоста с учётом dx/dy
-        end_x = root_x + panel.tail_dx
-        end_y = root_y + panel.tail_dy
+        root_angle = getattr(panel, 'tail_root_angle', math.pi / 2)
+        root_page_x = center_x + (panel.width / 2) * math.cos(root_angle)
+        root_page_y = center_y + (panel.height / 2) * math.sin(root_angle)
+
+        root_x, root_y = self.page_to_screen(root_page_x, root_page_y)
+
+        # 2. кончик хвоста (учитываем dx/dy в единицах страницы)
+        end_page_x = root_page_x + panel.tail_dx
+        end_page_y = root_page_y + panel.tail_dy
+        end_x, end_y = self.page_to_screen(end_page_x, end_page_y)
 
         # 4) стиль
         outline = "#FF6B6B" if panel.selected else panel.style.border_color
         bw      = max(1, int(panel.style.border_width * self.zoom))
 
-        # 5) треугольник-хвост
+        # 5) треугольник-хвост с ориентацией по касательной к овалу
+        tang_dx = -math.sin(root_angle) * panel.width
+        tang_dy =  math.cos(root_angle) * panel.height
+        norm = math.hypot(tang_dx, tang_dy)
+        if norm == 0:
+            tang_dx, tang_dy = 1, 0
+        else:
+            tang_dx /= norm
+            tang_dy /= norm
+
+        base = 5 * self.zoom
+        x1 = root_x + tang_dx * base
+        y1 = root_y + tang_dy * base
+        x2 = root_x - tang_dx * base
+        y2 = root_y - tang_dy * base
+
         self.canvas.create_polygon(
-            root_x - 5 * self.zoom, root_y,
-            root_x + 5 * self.zoom, root_y,
-            end_x, end_y,
+            x1, y1, x2, y2, end_x, end_y,
             fill=panel.style.fill_color,
             outline=outline,
             width=bw,
             tags=(f"panel_{panel.id}_tail", f"panel_{panel.id}_handle")
         )
 
-        # 6) круг-хэндл
-        r = 4 * self.zoom
+        # 6) круг-хэндлы
+        r = max(4, 6 * self.zoom)
         self.canvas.create_oval(
             end_x - r, end_y - r, end_x + r, end_y + r,
             fill=outline, outline="",
             tags=(f"panel_{panel.id}_tail_handle", f"panel_{panel.id}_handle")
+        )
+
+        self.canvas.create_oval(
+            root_x - r, root_y - r, root_x + r, root_y + r,
+            fill=outline, outline="",
+            tags=(f"panel_{panel.id}_tail_root_handle", f"panel_{panel.id}_handle")
         )
 
         # 7) текст (если есть)
@@ -1094,6 +1126,21 @@ class PageConstructor:
                     self.dragging  = True
                     return
 
+            hit, pid = self.clicked_canvas_item_has_tag(event.x, event.y, "_tail_root_handle")
+            if hit and pid:
+                self.tail_root_move_panel = next((p for p in self.panels if p.id == pid), None)
+                if self.tail_root_move_panel:
+                    self.drag_mode = "move_tail_root"
+                    self.dragging  = True
+                    angle = getattr(self.tail_root_move_panel, 'tail_root_angle', math.pi / 2)
+                    cx = self.tail_root_move_panel.x + self.tail_root_move_panel.width / 2
+                    cy = self.tail_root_move_panel.y + self.tail_root_move_panel.height / 2
+                    rx = cx + (self.tail_root_move_panel.width / 2) * math.cos(angle)
+                    ry = cy + (self.tail_root_move_panel.height / 2) * math.sin(angle)
+                    self.tail_root_drag_end_x = rx + self.tail_root_move_panel.tail_dx
+                    self.tail_root_drag_end_y = ry + self.tail_root_move_panel.tail_dy
+                    return
+
             # 1-b. resize-handle?
             if self.selected_panels:
                 cx, cy = self.canvas.canvasx(event.x), self.canvas.canvasy(event.y)
@@ -1174,10 +1221,30 @@ class PageConstructor:
         # 3-a. перетягиваем хвост речевого пузыря
         if self.drag_mode == "move_tail" and self.tail_move_panel:
             p = self.tail_move_panel
-            root_x = (p.x + p.width / 2) * self.zoom + self.margin
-            root_y = (p.y + p.height)      * self.zoom + self.margin
-            p.tail_dx = event.x - root_x
-            p.tail_dy = event.y - root_y
+            root_angle = getattr(p, 'tail_root_angle', math.pi / 2)
+            cx = p.x + p.width / 2
+            cy = p.y + p.height / 2
+            root_px = cx + (p.width / 2) * math.cos(root_angle)
+            root_py = cy + (p.height / 2) * math.sin(root_angle)
+            cur_page_x, cur_page_y = self.screen_to_page(event.x, event.y)
+            p.tail_dx = cur_page_x - root_px
+            p.tail_dy = cur_page_y - root_py
+            p.mark_visuals_for_update()
+            self.redraw()
+            return
+
+        if self.drag_mode == "move_tail_root" and self.tail_root_move_panel:
+            p = self.tail_root_move_panel
+            cur_page_x, cur_page_y = self.screen_to_page(event.x, event.y)
+            cx = p.x + p.width / 2
+            cy = p.y + p.height / 2
+            angle = math.atan2((cur_page_y - cy) * p.width,
+                               (cur_page_x - cx) * p.height)
+            p.tail_root_angle = angle
+            root_px = cx + (p.width / 2) * math.cos(angle)
+            root_py = cy + (p.height / 2) * math.sin(angle)
+            p.tail_dx = self.tail_root_drag_end_x - root_px
+            p.tail_dy = self.tail_root_drag_end_y - root_py
             p.mark_visuals_for_update()
             self.redraw()
             return
@@ -1251,6 +1318,16 @@ class PageConstructor:
             self.redraw()
             return
 
+        if self.drag_mode == "move_tail_root":
+            self.save_history_state()
+            self.app.project_modified = True
+            self.app.update_title()
+            self.tail_root_move_panel = None
+            self.dragging = False
+            self.drag_mode = None
+            self.redraw()
+            return
+
         # 4-2. закончили создание новой панели
         if self.drag_mode == "create":
             spx, spy = self.snap_to_grid_coords(start_px, start_py)
@@ -1283,6 +1360,7 @@ class PageConstructor:
         self.resize_handle = None
         self.panel_drag_initial_states.clear()
         self.tail_move_panel = None
+        self.tail_root_move_panel = None
 
         self.redraw()
         
