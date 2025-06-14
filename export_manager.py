@@ -988,10 +988,26 @@ class ExportManager:
                     
                 # Координаты и размеры панели на экспортном холсте (в пикселях)
                 # Сначала масштабируем относительно экспортной области, затем добавляем смещение вылетов
-                panel_export_x = int(panel.x * scale_content_x) + offset_x_bleed_px
-                panel_export_y = int(panel.y * scale_content_y) + offset_y_bleed_px
-                panel_export_w = int(panel.width * scale_content_x)
-                panel_export_h = int(panel.height * scale_content_y)
+                px1, py1 = panel.x, panel.y
+                px2, py2 = panel.x + panel.width, panel.y + panel.height
+
+                if panel.panel_type == PanelType.SPEECH_BUBBLE:
+                    cx = panel.x + panel.width / 2
+                    cy = panel.y + panel.height / 2
+                    angle = getattr(panel, 'tail_root_angle', math.pi / 2)
+                    rx = cx + (panel.width / 2) * math.cos(angle) + panel.tail_dx
+                    ry = cy + (panel.height / 2) * math.sin(angle) + panel.tail_dy
+                    px1 = min(px1, rx)
+                    py1 = min(py1, ry)
+                    px2 = max(px2, rx)
+                    py2 = max(py2, ry)
+
+                panel_export_x = int(px1 * scale_content_x) + offset_x_bleed_px
+                panel_export_y = int(py1 * scale_content_y) + offset_y_bleed_px
+                panel_export_w = int((px2 - px1) * scale_content_x)
+                panel_export_h = int((py2 - py1) * scale_content_y)
+                offset_inside_x = int((panel.x - px1) * scale_content_x)
+                offset_inside_y = int((panel.y - py1) * scale_content_y)
 
                 if panel_export_w <=0 or panel_export_h <=0: 
                     continue # Пропускаем нулевые или отрицательные размеры
@@ -1000,11 +1016,18 @@ class ExportManager:
                 # Это отношение целевого DPI к "базовому DPI" панелей (который теперь 300 DPI).
                 detail_scale_factor = target_dpi / REFERENCE_DPI_FOR_PAGE_SIZES 
 
-                self.render_panel_to_image(draw, panel, 
-                                           (panel_export_x, panel_export_y, 
-                                            panel_export_x + panel_export_w, panel_export_y + panel_export_h), 
-                                           detail_scale_factor,
-                                           export_target_image=image) # Передаем целевое изображение для PIL paste
+                self.render_panel_to_image(
+                    draw,
+                    panel,
+                    (panel_export_x, panel_export_y,
+                     panel_export_x + panel_export_w, panel_export_y + panel_export_h),
+                    detail_scale_factor,
+                    export_target_image=image,
+                    scale_x=scale_content_x,
+                    scale_y=scale_content_y,
+                    offset_x_px=offset_inside_x,
+                    offset_y_px=offset_inside_y,
+                )
 
             # --- 4. Добавление меток (если включены) ---
             # Здесь export_page_width_px и export_page_height_px - это размеры обрезной страницы
@@ -1028,7 +1051,12 @@ class ExportManager:
             panel: Panel,
             bounds: Tuple[int, int, int, int],
             scale_factor: float,                        # target_dpi / REFERENCE_DPI
-            export_target_image: Image.Image
+            export_target_image: Image.Image,
+            *,
+            scale_x: float,
+            scale_y: float,
+            offset_x_px: int = 0,
+            offset_y_px: int = 0,
     ):
         """
         Рендерит одну панель страницы на итоговый export-canvas.
@@ -1038,69 +1066,83 @@ class ExportManager:
         """
 
         x1_panel, y1_panel, x2_panel, y2_panel = bounds
-        panel_w_px = x2_panel - x1_panel
-        panel_h_px = y2_panel - y1_panel
-        if panel_w_px <= 0 or panel_h_px <= 0:
+        buf_w = x2_panel - x1_panel
+        buf_h = y2_panel - y1_panel
+        if buf_w <= 0 or buf_h <= 0:
             return
 
-        # ────────────────────────── буфер панели ──────────────────────────
-        panel_buf = Image.new("RGBA", (panel_w_px, panel_h_px), (0, 0, 0, 0))
+        panel_buf = Image.new("RGBA", (buf_w, buf_h), (0, 0, 0, 0))
+
+        panel_w_px = int(panel.width * scale_x)
+        panel_h_px = int(panel.height * scale_y)
 
         # 1. фон
         if panel.style.fill_color and panel.style.fill_color.lower() != "transparent":
             try:
                 panel_buf.paste(
-                    Image.new("RGBA", (panel_w_px, panel_h_px), panel.style.fill_color),
+                    Image.new("RGBA", (buf_w, buf_h), panel.style.fill_color),
                     (0, 0)
                 )
             except ValueError:
                 logger.warning(f"Некорректный цвет фона '{panel.style.fill_color}' у панели {panel.id}")
 
         # 2. изображение-контент
-        self._render_panel_image_content(panel, panel_buf, panel_w_px, panel_h_px)
+        self._render_panel_image_content(
+            panel, panel_buf, panel_w_px, panel_h_px, origin_x=offset_x_px, origin_y=offset_y_px
+        )
 
         # 3. маска базовой формы (овал или прямоугольник)
-        mask = Image.new("L", (panel_w_px, panel_h_px), 0)
+        mask = Image.new("L", (buf_w, buf_h), 0)
         mdraw = ImageDraw.Draw(mask)
         if panel.panel_type in (PanelType.ROUND,
                                 PanelType.SPEECH_BUBBLE,
                                 PanelType.THOUGHT_BUBBLE):
-            mdraw.ellipse((0, 0, panel_w_px, panel_h_px), fill=255)
+            mdraw.ellipse(
+                (offset_x_px, offset_y_px,
+                 offset_x_px + panel_w_px, offset_y_px + panel_h_px),
+                fill=255)
         else:
-            mdraw.rectangle((0, 0, panel_w_px, panel_h_px), fill=255)
+            mdraw.rectangle(
+                (offset_x_px, offset_y_px,
+                 offset_x_px + panel_w_px, offset_y_px + panel_h_px),
+                fill=255)
 
         # 3-a. хвост речевого пузыря
         if panel.panel_type == PanelType.SPEECH_BUBBLE:
-            # коэффициенты «единица страницы → пиксели» для данной панели
-            sx = panel_w_px / panel.width  if panel.width  else 1.0
-            sy = panel_h_px / panel.height if panel.height else 1.0
+            angle = getattr(panel, 'tail_root_angle', math.pi / 2)
+            cx = offset_x_px + panel_w_px / 2
+            cy = offset_y_px + panel_h_px / 2
+            root_x_px = cx + (panel_w_px / 2) * math.cos(angle)
+            root_y_px = cy + (panel_h_px / 2) * math.sin(angle)
+            end_x_px = root_x_px + panel.tail_dx * scale_x
+            end_y_px = root_y_px + panel.tail_dy * scale_y
 
-            root_x_px = int((panel.width / 2 + panel.tail_root_offset) * sx)
-            root_y_px = int(panel.height * sy)
-            end_x_px  = int((panel.width / 2 + panel.tail_root_offset + panel.tail_dx) * sx)
-            end_y_px  = int((panel.height + panel.tail_dy) * sy)
-            base_px   = int(12 * sx)
+            tang_dx = -math.sin(angle) * panel_w_px
+            tang_dy = math.cos(angle) * panel_h_px
+            norm = math.hypot(tang_dx, tang_dy)
+            if norm == 0:
+                tang_dx, tang_dy = 1, 0
+            else:
+                tang_dx /= norm
+                tang_dy /= norm
+
+            base_px = int(6 * max(scale_x, scale_y))
+            bx1 = root_x_px + tang_dx * base_px
+            by1 = root_y_px + tang_dy * base_px
+            bx2 = root_x_px - tang_dx * base_px
+            by2 = root_y_px - tang_dy * base_px
 
             # маска (чтобы хвост вырезался в ту же альфа-область)
-            mdraw.polygon(
-                (root_x_px - base_px, root_y_px,
-                 root_x_px + base_px, root_y_px,
-                 end_x_px, end_y_px),
-                fill=255
-            )
+            mdraw.polygon((bx1, by1, bx2, by2, end_x_px, end_y_px), fill=255)
 
             # сам хвост
             panel_draw = ImageDraw.Draw(panel_buf)
             border_w   = max(1, int(panel.style.border_width * scale_factor)) \
                 if panel.style.border_width > 0 else 0
-            panel_draw.polygon(
-                (root_x_px - base_px, root_y_px,
-                 root_x_px + base_px, root_y_px,
-                 end_x_px, end_y_px),
-                fill=panel.style.fill_color,
-                outline=panel.style.border_color if border_w else None,
-                width=border_w
-            )
+            panel_draw.polygon((bx1, by1, bx2, by2, end_x_px, end_y_px),
+                               fill=panel.style.fill_color,
+                               outline=panel.style.border_color if border_w else None,
+                               width=border_w)
 
         # 4. объединяем маску и буфер
         panel_buf.putalpha(mask)
@@ -1108,9 +1150,16 @@ class ExportManager:
         # 5. вставляем панель на общий экспорт-canvas
         export_target_image.paste(panel_buf, (x1_panel, y1_panel), panel_buf)
 
+        text_bounds = (
+            x1_panel + offset_x_px,
+            y1_panel + offset_y_px,
+            x1_panel + offset_x_px + panel_w_px,
+            y1_panel + offset_y_px + panel_h_px,
+        )
+
         # 6. текст
         if panel.content_text:
-            self.render_panel_text(draw, panel, bounds, scale_factor)
+            self.render_panel_text(draw, panel, text_bounds, scale_factor)
 
         # 7. внешняя рамка панели
         border_w = max(1, int(panel.style.border_width * scale_factor)) \
@@ -1120,12 +1169,23 @@ class ExportManager:
                 if panel.panel_type in (PanelType.ROUND,
                                         PanelType.SPEECH_BUBBLE,
                                         PanelType.THOUGHT_BUBBLE):
-                    draw.ellipse(bounds, outline=panel.style.border_color, width=border_w)
+                    draw.ellipse(text_bounds, outline=panel.style.border_color, width=border_w)
                 else:
-                    draw.rectangle(bounds, outline=panel.style.border_color, width=border_w)
+                    draw.rectangle(text_bounds, outline=panel.style.border_color, width=border_w)
             except ValueError:
                 logger.warning(f"Некорректный цвет рамки '{panel.style.border_color}' у панели {panel.id}")
-
+                
+    def _render_panel_image_content(
+            self,
+            panel: Panel,
+            panel_buf: Image.Image,
+            panel_w_px: int,
+            panel_h_px: int,
+            *,
+            origin_x: int = 0,
+            origin_y: int = 0,
+    ) -> None:
+        """Отрисовка изображения внутри панели на временный буфер."""
     def _render_panel_image_content(self, panel: Panel, panel_buf: Image.Image,
                                     panel_w_px: int, panel_h_px: int) -> None:
         """Отрисовывает изображение панели в указанный буфер."""
@@ -1133,6 +1193,24 @@ class ExportManager:
             return
 
         try:
+            src = Image.open(panel.content_image)
+        except Exception as e:
+            logger.error(f"Не удалось открыть изображение панели {panel.id}: {e}")
+            return
+
+        sx = panel_w_px / panel.width if panel.width else 1.0
+        sy = panel_h_px / panel.height if panel.height else 1.0
+
+        render_w = int(src.width * panel.image_scale * sx)
+        render_h = int(src.height * panel.image_scale * sy)
+        if render_w <= 0 or render_h <= 0:
+            return
+
+        img_resized = src.resize((render_w, render_h), Image.Resampling.LANCZOS)
+        offset_x_px = int(panel.image_offset_x * sx) + origin_x
+        offset_y_px = int(panel.image_offset_y * sy) + origin_y
+
+        panel_buf.paste(img_resized, (offset_x_px, offset_y_px))
             with Image.open(panel.content_image) as img:
                 sx = panel_w_px / panel.width if panel.width else 1.0
                 sy = panel_h_px / panel.height if panel.height else 1.0
